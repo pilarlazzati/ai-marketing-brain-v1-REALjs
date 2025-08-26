@@ -1,7 +1,5 @@
 // ======================= index.js (FULL FILE) =======================
-try {
-  require("dotenv").config();
-} catch (_) {}
+try { require("dotenv").config(); } catch (_) {}
 
 const express = require("express");
 const path = require("path");
@@ -9,6 +7,47 @@ const { z } = require("zod");
 const { nanoid } = require("nanoid");
 const { createObjectCsvWriter } = require("csv-writer");
 const fsp = require("fs/promises");
+
+// ---- KB helpers ----
+const loadKB = async () => {
+  try {
+    const kbPath = path.join(__dirname, "kb.mdkb.md");
+    const content = await fsp.readFile(kbPath, "utf-8");
+    return content;
+  } catch (err) {
+    console.log("[KB] No knowledge base found:", err.message);
+    return "";
+  }
+};
+
+const pickKBContext = (query, kb) => {
+  if (!kb || !query) return "";
+  const lines = kb.split("\n").filter(l => l.trim());
+  const relevant = lines.filter(line => {
+    const lowerLine = line.toLowerCase();
+    const lowerQuery = query.toLowerCase();
+    return lowerQuery.split(" ").some(word => lowerLine.includes(word));
+  }).slice(0, 10);
+  return relevant.length ? relevant.join("\n") : kb.slice(0, 800);
+};
+
+const safeJsonParse = (str) => {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return null;
+  }
+};
+
+const initKB = async () => {
+  const kb = await loadKB();
+  console.log("[KB] Loaded", kb ? kb.length : 0, "chars");
+  return kb;
+};
+
+// Initialize KB at startup
+let GLOBAL_KB = "";
+initKB().then(kb => { GLOBAL_KB = kb; });
 
 // ---- Config / Flags ----
 const USE_MOCK = String(process.env.USE_MOCK || "true") === "true";
@@ -66,413 +105,218 @@ const CHANNEL_SPECS = {
 
 const GoalToChannels = {
   CTR: ["instagram", "linkedin", "youtube"],
-  "Watch Time": ["youtube", "instagram", "linkedin"],
-  Leads: ["linkedin", "instagram", "youtube"],
+  Engagement: ["instagram", "linkedin", "youtube"],
+  Conversion: ["linkedin", "instagram", "youtube"],
 };
 
-// ---------- Helpers ----------
-const clamp = (s, n) => {
-  const t = String(s || "");
-  return n && t.length > n ? t.slice(0, n - 1) + "…" : t;
-};
-const stripEmojis = (s) =>
-  String(s || "").replace(
-    /\p{Emoji_Presentation}|\p{Extended_Pictographic}/gu,
-    "",
-  );
+// ---------- LLM / Generation ----------
 
-// Deterministic (mock/fallback) generators
-function genInstagram({ product, headline, body, cta, audience, proof }) {
-  const hook = clamp(
-    headline || `${product}: built for ${audience || "you"}`,
-    90,
-  );
-  const main = clamp(
-    body ||
-      `Turn one winning creative into platform-ready variants in minutes.`,
-    180,
-  );
-  const closing = clamp(cta || "Learn more", 40);
-  const hashBase = (product.split(/\s+/)[0] || "brand").toLowerCase();
-  const hashtags = `#${hashBase} #${(audience || "marketing").toLowerCase().replace(/\s+/g, "")} #ad`;
-  return `${hook}\n\n${main}\n\n${proof ? `Proof: ${proof}\n\n` : ""}${closing} ›\n${hashtags}`;
-}
-function genYouTube({ product, headline, body, cta, audience, proof }) {
-  return [
-    `HOOK (0–2s): ${headline || `See ${product} fix ${audience || "your"} pain.`}`,
-    `SCENE 1 (2–10s): Pain for ${audience || "teams"} in 1 sentence.`,
-    `SCENE 2 (10–25s): ${product} solves it. ${proof ? `(${proof})` : ""}`,
-    `SCENE 3 (25–45s): 2–3 benefits on screen.`,
-    `SCENE 4 (45–55s): Quick demo or before/after.`,
-    `CTA (55–60s): ${cta || "Tap to try it today."}`,
-  ].join("\n");
-}
-function genLinkedIn({ product, headline, body, cta, audience, proof }) {
-  const p1 =
-    headline ||
-    `A faster way for ${audience || "teams"} to win with ${product}`;
-  const p2 =
-    body ||
-    `${product} turns one winning creative into platform-ready variants in minutes, not weeks.`;
-  const p3 = proof
-    ? `Proof: ${proof}`
-    : `Early teams report faster testing cycles and clearer creative insights.`;
-  const p4 = `If you want a practical way to scale what already works, this is it.`;
-  const p5 =
-    cta || `DM me for the demo link or comment "DEMO" and I’ll share it.`;
-  return [p1, "", p2, "", p3, "", p4, "", p5].join("\n");
-}
-function makeVariant(channelKey, inputs, goal) {
-  const base = CHANNEL_SPECS[channelKey];
-  let copy =
-    channelKey === "instagram"
-      ? genInstagram(inputs)
-      : channelKey === "youtube"
-        ? genYouTube(inputs)
-        : genLinkedIn(inputs);
-  copy = stripEmojis(copy);
-  copy = clamp(copy, base.maxChars);
+/**
+ * Generate variants with KB grounding
+ */
+async function genVariantsLLM(channels, originalContent, goalHint = "CTR", brandVoice = "") {
+  const kbContext = pickKBContext(originalContent, GLOBAL_KB);
 
-  const rationaleGoal =
-    goal === "Watch Time"
-      ? "Hook early; tight beats sustain viewing."
-      : goal === "Leads"
-        ? "Outcome-focused copy + clear CTA to drive form fills."
-        : "Punchy hook + skimmable benefits to raise CTR.";
-  return {
-    channel: base.label,
-    copy,
-    specs: base.specs,
-    rationale: `Tailored to ${base.label}. ${rationaleGoal}`,
-  };
-}
-function makeABPlan(inputs, goal) {
-  const metric =
-    goal === "Watch Time"
-      ? "3s views & avg % viewed"
-      : goal === "Leads"
-        ? "Form submit rate / demo requests"
-        : "Click-through rate";
-  return {
-    hypothesis: `A stronger hook referencing “${inputs.audience || "your audience"}” increases ${metric} by 15–25%.`,
-    variantA: "Conservative: keep original hook and straightforward CTA.",
-    variantB: "Bold: punchy hook + time-bound CTA in the first line.",
-    metric,
-    run: "3–7 days with even spend; declare winner at practical uplift.",
-  };
-}
-
-// ---------- REAL LLM generator (ONE copy; robust parsing) ----------
-async function genVariantsLLM({ text, goal }) {
-  if (!openai) throw new Error("OpenAI not configured");
-
-  const rules = Object.values(CHANNEL_SPECS)
-    .map((v) => `${v.label}: ${v.specs.join("; ")} (max ${v.maxChars} chars)`)
-    .join("\n- ");
-
-  const sys = [
-    "You are a marketing copy assistant.",
-    "Return STRICT JSON in this exact shape:",
-    '{"variants":[{"platform":"","copy":"","spec":{},"rationale":""}]}',
-    "No markdown, no code fences, no extra text.",
-  ].join("\n");
-
-  const user = {
-    goal,
-    text,
-    platform_rules: rules,
-    platforms: Object.values(CHANNEL_SPECS).map((v) => v.label),
-  };
-
-  const model = process.env.OPENAI_JSON_MODEL || "gpt-4o-mini";
-
-  // Simpler call (skip response_format to avoid 400s on some accounts)
-  const resp = await openai.chat.completions.create({
-    model,
-    temperature: 0.2,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: JSON.stringify(user) },
-    ],
-    max_tokens: 600,
-  });
-
-  const raw = String(resp.choices?.[0]?.message?.content || "").trim();
-
-  function safeParseJson(s) {
-    try {
-      return JSON.parse(s);
-    } catch {}
-    const start = s.indexOf("{");
-    const end = s.lastIndexOf("}");
-    if (start !== -1 && end !== -1 && end > start) {
-      try {
-        return JSON.parse(s.slice(start, end + 1));
-      } catch {}
+  const mockResponse = {
+    instagram: {
+      content: "🚀 Turn your top creative into 3 platform-ready variants in MINUTES! DTC CMOs - stop spending hours on repurposing. Our AI brain cuts time-to-publish by 80%. Ready to ship faster? Try the demo now! #DTCMarketing #ContentRepurposing #MarketingAutomation",
+      reasoning: "Instagram post optimized for 4:5 image format with hook, value prop, and relevant hashtags. Kept under 300 chars for better engagement."
+    },
+    youtube: {
+      content: "5-Beat Outline:\n1. HOOK: 'DTC CMOs - tired of content bottlenecks?'\n2. PROBLEM: 'Hours spent repurposing for each platform'\n3. SOLUTION: 'Omnify Marketing Brain - 3 variants in minutes'\n4. PROOF: 'Cut time-to-publish by 80%'\n5. CTA: 'Try the demo - link in bio'\n\nVertical format, grab attention in first 2 seconds with the CMO pain point.",
+      reasoning: "YouTube Shorts format with 5-beat structure, vertical orientation focus, and strong hook addressing target audience pain."
+    },
+    linkedin: {
+      content: "DTC CMOs at $50-150M brands know this pain:\n\nYou've got winning creative, but adapting it for each platform eats up precious hours.\n\nWhat if you could take your top-performing content and instantly generate channel-ready versions?\n\nThat's exactly what Omnify Marketing Brain delivers. Ship 3 platform variants in minutes, not hours.\n\nThe result? 80% faster time-to-publish.\n\nReady to transform your content workflow?",
+      reasoning: "LinkedIn format with 3 short paragraphs, professional tone for CMO audience, no hashtags for cleaner look, around 700 chars."
     }
-    return null;
-  }
+  };
 
-  const parsed = safeParseJson(raw);
-  if (!parsed || !Array.isArray(parsed.variants)) {
-    console.error("[genVariantsLLM] bad JSON from model:", raw.slice(0, 300));
-    // minimal fallback so pipeline continues
-    return Object.values(CHANNEL_SPECS)
-      .slice(0, 3)
-      .map((v) => ({
-        platform: v.label,
-        copy: `${text} — optimized for ${v.label}`,
-        spec: v.specs,
-        rationale: `Matches ${v.label} norms.`,
-      }));
-  }
-
-  return parsed.variants.slice(0, 3).map((v) => {
-    const spec = Object.values(CHANNEL_SPECS).find(
-      (s) => s.label === v.platform,
-    );
-    const max = spec?.maxChars ?? 900;
-    return {
-      platform: v.platform || spec?.label || "Unknown",
-      copy: clamp(stripEmojis(String(v.copy || "")), max),
-      spec: v.spec || (spec ? spec.specs : []),
-      rationale: String(v.rationale || "").slice(0, 240),
-    };
-  });
-}
-
-// ---------- Keep your existing UI endpoints working ----------
-const InputSchema = z.object({
-  product: z.string().min(1, "product required"),
-  headline: z.string().optional().default(""),
-  body: z.string().optional().default(""),
-  cta: z.string().optional().default(""),
-  audience: z.string().optional().default(""),
-  proof: z.string().optional().default(""),
-  channels: z
-    .array(z.enum(["instagram", "youtube", "linkedin"]))
-    .min(1, "pick at least one channel")
-    .optional(),
-  goal: z.enum(["CTR", "Watch Time", "Leads"]).optional().default("CTR"),
-});
-
-function generateHandler(req, res) {
-  try {
-    const parsed = InputSchema.safeParse(req.body || {});
-    if (!parsed.success) {
-      diag.genFail++;
-      return res
-        .status(400)
-        .json({ error: parsed.error.issues.map((i) => i.message).join(", ") });
-    }
-    const { channels, goal, ...inputs } = parsed.data;
-    const finalChannels =
-      channels && channels.length ? channels : GoalToChannels[goal];
-    const variants = finalChannels.map((c) => makeVariant(c, inputs, goal));
-    const abplan = makeABPlan(inputs, goal);
+  if (USE_MOCK || !openai) {
+    console.log("[genVariantsLLM] Using mock (USE_MOCK=", USE_MOCK, ", openai=", !!openai, ")");
     diag.gen++;
-    return res.json({
-      variants,
-      abplan,
-      aiAvailable: !!openai,
-      version: VERSION,
-    });
-  } catch (e) {
-    console.error(e);
-    diag.genFail++;
-    return res.status(500).json({ error: "Generation failed." });
+    return mockResponse;
+  }
+
+  try {
+    const prompt = `You are an expert content creator. Generate ${channels.length} platform variants optimized for ${goalHint}.
+
+KNOWLEDGE BASE CONTEXT:
+${kbContext}
+
+ORIGINAL CONTENT:
+${originalContent}
+
+BRAND VOICE: ${brandVoice}
+
+CHANNEL SPECS:
+${channels.map(ch => `${ch}: ${JSON.stringify(CHANNEL_SPECS[ch])}`).join("\n")}
+
+Return JSON with this structure:
+{
+  "channelName": {
+    "content": "adapted content",
+    "reasoning": "brief explanation"
   }
 }
-app.post("/generate", generateHandler);
-app.post("/api/generate", generateHandler);
 
-app.post("/polish", async (req, res) => {
-  try {
-    if (!openai) {
-      return res.json({
-        polished: null,
-        message: "AI key not configured; using rule engine only.",
-      });
-    }
-    const Body = z.object({
-      context: z.object({
-        product: z.string(),
-        audience: z.string().optional().default(""),
-        goal: z.enum(["CTR", "Watch Time", "Leads"]).optional().default("CTR"),
-        polishOnlyOne: z.boolean().optional().default(false),
-      }),
-      variants: z.array(
-        z.object({
-          channel: z.string(),
-          copy: z.string(),
-          specs: z.array(z.string()),
-        }),
-      ),
+Requirements:
+- Follow each channel's character limits and format specs exactly
+- Use knowledge base context to ensure brand consistency
+- Optimize for the specified goal (${goalHint})
+- Include reasoning for each adaptation`;
+
+    const response = await openai.chat.completions.create({
+      model: process.env.OPENAI_JSON_MODEL || "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      temperature: 0.7,
     });
-    const parsed = Body.safeParse(req.body || {});
-    if (!parsed.success) {
-      diag.polishFail++;
-      return res.status(400).json({ error: "Bad polish payload." });
-    }
 
-    const { context, variants } = parsed.data;
-    const toPolish = context.polishOnlyOne ? [variants[0]] : variants;
+    const result = safeJsonParse(response.choices[0]?.message?.content || "{}");
+    if (!result) throw new Error("Failed to parse JSON response");
 
-    const out = [];
-    for (const v of toPolish) {
-      const max =
-        Object.values(CHANNEL_SPECS).find((s) => s.label === v.channel)
-          ?.maxChars ?? 900;
-      const prompt = [
-        `Improve the copy for ${v.channel}.`,
-        `Constraints: keep under ${max} characters. Preserve meaning. Punchy. Respect norms: ${v.specs.join("; ")}`,
-        `Context: product=${context.product}, audience=${context.audience}, goal=${context.goal}.`,
-        `Original:\n${v.copy}\n\nReturn ONLY the improved copy text.`,
-      ].join("\n");
-
-      const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_JSON_MODEL || "gpt-4o-mini",
-        temperature: 0.2,
-        max_tokens: 240,
-        messages: [{ role: "user", content: prompt }],
-      });
-
-      const improved = clamp(
-        String(completion.choices?.[0]?.message?.content || "").trim(),
-        max,
-      );
-      out.push({ ...v, copy: improved });
-    }
-    const merged = context.polishOnlyOne ? [out[0], ...variants.slice(1)] : out;
-    diag.polish++;
-    return res.json({ polished: merged });
+    diag.gen++;
+    return result;
   } catch (err) {
-    console.error(err);
-    diag.polishFail++;
-    return res.status(500).json({ error: "Polish failed." });
+    console.error("[genVariantsLLM] Error:", err.message);
+    diag.genFail++;
+    return mockResponse;
   }
+}
+
+// ---------- Polish function ----------
+async function polishVariants(variants, feedback) {
+  if (USE_MOCK || !openai) {
+    console.log("[polishVariants] Using mock");
+    diag.polish++;
+    return variants; // Return as-is for mock
+  }
+
+  try {
+    const prompt = `Polish these content variants based on feedback.
+
+CURRENT VARIANTS:
+${JSON.stringify(variants, null, 2)}
+
+FEEDBACK:
+${feedback}
+
+Return improved JSON in same structure. Keep channel specs and limits.`;
+
+    const response = await openai.chat.completions.create({
+      model: process.env.OPENAI_JSON_MODEL || "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      temperature: 0.5,
+    });
+
+    const result = safeJsonParse(response.choices[0]?.message?.content || "{}");
+    diag.polish++;
+    return result || variants;
+  } catch (err) {
+    console.error("[polishVariants] Error:", err.message);
+    diag.polishFail++;
+    return variants;
+  }
+}
+
+// ---------- API Routes ----------
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", version: VERSION, ...diag });
 });
 
-// ---------- MVP loop: REAL (+ fallback), CSV, share page ----------
-const memory = new Map();
+app.get("/api/channels", (req, res) => {
+  res.json({ channels: CHANNEL_SPECS, goals: GoalToChannels });
+});
 
-app.post("/variants", async (req, res) => {
+app.post("/api/generate-variants", async (req, res) => {
   try {
-    const text = String((req.body && req.body.text) || "").trim();
-    const goal = (req.body && req.body.goal) || "CTR";
-    if (!text) return res.status(400).json({ error: "Provide 'text' in body" });
+    const { originalContent, goal = "CTR", brandVoice = "", channels } = req.body;
 
-    let variants;
-    if (!USE_MOCK && openai) {
-      variants = await genVariantsLLM({ text, goal }); // REAL
-    } else {
-      // Fallback to deterministic (MOCK)
-      const inputs = {
-        product: "Your Product",
-        headline: text,
-        body: "",
-        cta: "Learn more",
-        audience: "",
-        proof: "",
-      };
-      const channels = ["instagram", "youtube", "linkedin"];
-      const v3 = channels.map((c) => makeVariant(c, inputs, goal));
-      variants = v3.map((v) => ({
-        platform: v.channel,
-        copy: v.copy,
-        spec: v.specs,
-        rationale: v.rationale,
-      }));
+    if (!originalContent) {
+      return res.status(400).json({ error: "originalContent required" });
     }
 
-    // Write CSV
-    const request_id = nanoid();
-    const csvPath = path.join(EXPORT_DIR, `${request_id}.csv`);
-    const writer = createObjectCsvWriter({
-      path: csvPath,
-      header: [
-        { id: "platform", title: "Platform" },
-        { id: "copy", title: "Copy" },
-        { id: "spec", title: "Spec(JSON)" },
-        { id: "rationale", title: "Rationale" },
-      ],
-    });
-    await writer.writeRecords(
-      variants.map((r) => ({ ...r, spec: JSON.stringify(r.spec) })),
-    );
+    const targetChannels = channels || GoalToChannels[goal] || ["instagram", "linkedin", "youtube"];
+    const variants = await genVariantsLLM(targetChannels, originalContent, goal, brandVoice);
 
-    const csv_url = `/exports/${request_id}.csv`;
-    const share_url = `/v/${request_id}`;
-
-    memory.set(request_id, { request_id, variants, csv_url, share_url });
-
-    return res.json({
-      request_id,
-      variants,
-      csv_url,
-      share_url,
-      version: VERSION,
-      mock: USE_MOCK,
-    });
-  } catch (e) {
-    const status = e?.status || e?.response?.status;
-    const data = e?.response?.data;
-    console.error("[/variants] ERROR", {
-      message: e?.message,
-      status,
-      data,
-      name: e?.name,
-      stack: e?.stack,
-    });
-    return res.status(500).json({ error: "Internal error" });
+    res.json({ variants, goal, channels: targetChannels });
+  } catch (error) {
+    console.error("Generate variants error:", error);
+    res.status(500).json({ error: "Generation failed" });
   }
 });
 
-app.get("/api/variants/:id", (req, res) => {
-  const data = memory.get(req.params.id);
-  if (!data) return res.status(404).json({ error: "Not found" });
-  res.json(data);
+app.post("/api/polish-variants", async (req, res) => {
+  try {
+    const { variants, feedback } = req.body;
+
+    if (!variants || !feedback) {
+      return res.status(400).json({ error: "variants and feedback required" });
+    }
+
+    const polished = await polishVariants(variants, feedback);
+    res.json({ variants: polished });
+  } catch (error) {
+    console.error("Polish variants error:", error);
+    res.status(500).json({ error: "Polish failed" });
+  }
 });
 
-app.get("/v/:id", (req, res) => {
-  res.type("html").send(`<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Variants</title>
-<style>body{font-family:system-ui;margin:24px} pre{white-space:pre-wrap}</style>
-</head>
-<body>
-  <h1>Variants for <span id="rid"></span></h1>
-  <div id="list"></div>
-  <script>
-    (async () => {
-      const rid = location.pathname.split('/').pop();
-      document.getElementById('rid').textContent = rid;
-      const r = await fetch('/api/variants/' + rid);
-      const data = await r.json();
-      const list = document.getElementById('list');
-      (data.variants || []).forEach(v => {
-        const el = document.createElement('div');
-        el.innerHTML = '<h3>'+v.platform+'</h3><p>'+v.copy+'</p><pre>'+JSON.stringify(v.spec,null,2)+'</pre><em>'+v.rationale+'</em><hr/>';
-        list.appendChild(el);
-      });
-    })();
-  </script>
-</body></html>`);
+// Export route
+app.post("/api/export", async (req, res) => {
+  try {
+    const { variants, originalContent, goal } = req.body;
+
+    if (!variants) {
+      return res.status(400).json({ error: "variants required" });
+    }
+
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+    const exportId = nanoid();
+    const filename = `export-${exportId}.csv`;
+    const filepath = path.join(EXPORT_DIR, filename);
+
+    // Prepare CSV data
+    const csvData = Object.entries(variants).map(([channel, data]) => ({
+      channel,
+      content: typeof data === 'object' ? data.content : data,
+      reasoning: typeof data === 'object' ? data.reasoning : '',
+      goal: goal || 'CTR',
+      timestamp,
+      original: originalContent || ''
+    }));
+
+    const csvWriter = createObjectCsvWriter({
+      path: filepath,
+      header: [
+        { id: 'channel', title: 'Channel' },
+        { id: 'content', title: 'Content' },
+        { id: 'reasoning', title: 'Reasoning' },
+        { id: 'goal', title: 'Goal' },
+        { id: 'timestamp', title: 'Timestamp' },
+        { id: 'original', title: 'Original Content' }
+      ]
+    });
+
+    await csvWriter.writeRecords(csvData);
+
+    const downloadUrl = `/exports/${filename}`;
+    res.json({ 
+      success: true, 
+      downloadUrl, 
+      filename,
+      exportId 
+    });
+  } catch (error) {
+    console.error("Export error:", error);
+    res.status(500).json({ error: "Export failed" });
+  }
 });
 
-// ---- Health / Diag ----
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    version: VERSION,
-    mock: USE_MOCK,
-    model: process.env.OPENAI_JSON_MODEL || "gpt-4o-mini",
-  });
-});
-app.get("/diag", (_req, res) => res.json(diag));
-
-// ---- Start ----
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Version: ${VERSION}`);
 });
-// ===================== end index.js (FULL) =====================
