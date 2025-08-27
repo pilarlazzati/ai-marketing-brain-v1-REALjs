@@ -1,0 +1,81 @@
+{
+  "kb_title": "Omnify Content Repurposing Brain",
+  "last_updated": "2025-08-07",
+  "priority_tactics": [
+    {
+      "tactic": "Short-form vertical video repurposing",
+      "description": "Turn best-performing UGC or influencer clips into 15–60s vertical videos for TikTok, IG Reels, and YouTube Shorts using trending audio and native captions/CTAs."
+    },
+    {
+      "tactic": "UGC & influencer amplification",
+      "description": "License viral influencer or customer videos, repurpose across Meta Ads, WhatsApp, PDPs, and email. Authenticity drives CAC reduction."
+    },
+    {
+      "tactic": "Native cross-channel adaptation",
+      "description": "Edit and re-post winning creatives natively (correct specs, aspect ratio, copy) to maximize reach and algorithmic performance."
+    },
+    {
+      "tactic": "Multi-format & sequential remixing",
+      "description": "Break down long-form or testimonials into swipeable carousels, Stories, and WhatsApp updates."
+    }
+  ],
+  "channel_templates": {
+    "Instagram Reels": {
+      "format": "1080x1920, 15–90s, 9:16, trending song",
+      "framework": {
+        "hook": "[Impact statement]",
+        "body": "[Demo/UGC/tutorial]",
+        "cta": "[Shop/Coupon/Tag]"
+      }
+    },
+    "TikTok": {
+      "format": "1080x1920, 3–60s, 9:16, lo-fi/UGC style",
+      "framework": {
+        "hook": "[Bold visual/audio hook]",
+        "body": "[Challenge/demo]",
+        "cta": "[Hashtag/Link in bio]"
+      }
+    },
+    "YouTube Shorts": {
+      "format": "1080x1920, <60s, vertical",
+      "framework": {
+        "hook": "[Quick open/question]",
+        "body": "[Highlight/explainer]",
+        "cta": "[Subscribe/Shop]"
+      }
+    },
+    "Facebook Carousel": {
+      "format": "1080x1080, 2–10 slides, 1:1",
+      "framework": {
+        "text": "[Overview]",
+        "cards": "[Steps/proof]",
+        "cta": "[Swipe/Shop]"
+      }
+    },
+    "WhatsApp Broadcast": {
+      "format": "Image/Video <5MB, 9:16, up to 10 cards",
+      "framework": {
+        "header": "[Deal/Alert]",
+        "body": "[Offer/Testimonial]",
+        "button": "[Shop/View]"
+      }
+    }
+  },
+  "benchmarks": {
+    "US": { "engagement": "2–5%", "CTR": "0.5–1.2%", "retention": "5–10%" },
+    "UK": { "engagement": "1.5–4%", "CTR": "0.4–1.0%", "retention": "5–10%" },
+    "India": { "engagement": "3–6%", "CTR": "0.6–1.5%", "retention": "8–12%" }
+  },
+  "case_studies": [
+    {
+      "brand": "Rare Beauty",
+      "tactic": "Repurposed Reels → TikTok & Shorts",
+      "result": "Boosted engagement 240%, reduced CAC 18%"
+    },
+    {
+      "brand": "Liquid I.V.",
+      "tactic": "Influencer testimonials → WhatsApp carousels",
+      "result": "95%+ open rates, 2.8x ROI"
+    }
+  ]
+}
